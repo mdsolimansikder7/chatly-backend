@@ -157,3 +157,4 @@ async function start() {
 start().catch((error) => {
   console.error("Failed to start Chatly API:", error);
   process.exit(1);
+});
