@@ -6,7 +6,7 @@ const { areFriends, isBlockedBetween } = require("../utils/friendships");
 const DISAPPEAR_OPTIONS = [0, 600, 3600, 86400, 604800];
 
 const populatedConversation = (id) => Conversation.findById(id)
-  .populate("members", "name email username avatar bio status isOnline lastSeen")
+  .populate("members", "name email username chatlyId avatar bio status isOnline lastSeen")
   .populate({ path: "lastMessage", populate: { path: "sender", select: "name avatar" } });
 
 function clearedAtFor(conversation, userId) {
@@ -79,7 +79,7 @@ exports.createGroup = async (req, res) => {
 exports.getMyConversations = async (req, res) => {
   try {
     const conversations = await Conversation.find({ members: req.user._id })
-      .populate("members", "name email username avatar bio status isOnline lastSeen")
+      .populate("members", "name email username chatlyId avatar bio status isOnline lastSeen")
       .populate({ path: "lastMessage", populate: { path: "sender", select: "name avatar" } })
       .sort({ updatedAt: -1 });
 

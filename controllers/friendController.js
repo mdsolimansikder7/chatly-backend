@@ -76,7 +76,8 @@ exports.acceptRequest = async (req, res) => {
     });
     if (!request) return res.status(404).json({ message: "Friend request not found." });
 
-    if (request.status === "pending") {
+    const newlyAccepted = request.status === "pending";
+    if (newlyAccepted) {
       request.status = "accepted";
       await request.save();
     }
@@ -87,6 +88,15 @@ exports.acceptRequest = async (req, res) => {
       members: { $all: members, $size: 2 },
     });
     if (!conversation) conversation = await Conversation.create({ members });
+
+    if (newlyAccepted) {
+      const io = req.app.get("io");
+      if (io) {
+        const event = { conversationId: conversation._id.toString() };
+        io.to(request.sender.toString()).emit("friendRequestAccepted", event);
+        io.to(request.recipient.toString()).emit("friendRequestAccepted", event);
+      }
+    }
 
     return res.json({
       _id: request._id,

@@ -1,12 +1,33 @@
+
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
+
 const User = require("../models/User");
 const { createChatlyId, ensureChatlyId } = require("../utils/chatlyId");
 const { sendVerificationEmail } = require("../utils/email");
 
+// =========================
+// Constants
+// =========================
+
+const USERNAME_PATTERN = /^[a-z0-9_]{3,20}$/;
+const PASSWORD_MIN_LENGTH = 6;
+const VERIFICATION_TOKEN_EXPIRY_MS = 60 * 60 * 1000;
+const RESEND_COOLDOWN_MS = 60 * 1000;
+
+// =========================
+// Helpers
+// =========================
+
 function createToken(id) {
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+  if (!process.env.JWT_SECRET) {
+    throw new Error("JWT_SECRET is not configured.");
+  }
+
+  return jwt.sign({ id: String(id) }, process.env.JWT_SECRET, {
+    expiresIn: "7d",
+  });
 }
 
 function publicUser(user) {
@@ -26,58 +47,174 @@ function publicUser(user) {
   };
 }
 
-const USERNAME_PATTERN = /^[a-z0-9_]{3,20}$/;
-
-async function issueVerificationEmail(user) {
-  const token = crypto.randomBytes(32).toString("hex");
-  user.emailVerificationToken = crypto.createHash("sha256").update(token).digest("hex");
-  user.emailVerificationExpires = new Date(Date.now() + 60 * 60 * 1000);
-  user.verificationEmailSentAt = new Date();
-  await user.save();
-  await sendVerificationEmail({ email: user.email, name: user.name, token });
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
+function normalizeUsername(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^@+/, "")
+    .toLowerCase();
+}
+
+function createVerificationToken() {
+  const token = crypto.randomBytes(32).toString("hex");
+
+  return {
+    token,
+    tokenHash: crypto.createHash("sha256").update(token).digest("hex"),
+  };
+}
+
+function handleServerError(res, error, message) {
+  // Full error details go to server logs, not to the client.
+  console.error(message, error);
+
+  return res.status(500).json({
+    message,
+  });
+}
+
+// =========================
+// Email Verification Helper
+// =========================
+
+async function issueVerificationEmail(user) {
+  const { token, tokenHash } = createVerificationToken();
+
+  user.emailVerificationToken = tokenHash;
+  user.emailVerificationExpires = new Date(
+    Date.now() + VERIFICATION_TOKEN_EXPIRY_MS
+  );
+  user.verificationEmailSentAt = new Date();
+
+  await user.save();
+
+  await sendVerificationEmail({
+    email: user.email,
+    name: user.name,
+    token,
+  });
+}
+
+// =========================
+// REGISTER
+// =========================
+
 exports.register = async (req, res) => {
+  let createdUserId = null;
+
   try {
-    const name = String(req.body.name || "").trim();
-    const email = String(req.body.email || "").trim().toLowerCase();
-    const password = String(req.body.password || "");
+    const name = String(req.body?.name || "").trim();
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || "");
+
+    const rawUsername = req.body?.username;
+    let username;
 
     if (!name || !email || !password) {
-      return res.status(400).json({ message: "Name, email, and password are required." });
-    }
-    if (password.length < 6) {
-      return res.status(400).json({ message: "Password must contain at least 6 characters." });
+      return res.status(400).json({
+        message: "Name, email, and password are required.",
+      });
     }
 
-    let username;
-    if (req.body.username !== undefined && String(req.body.username).trim() !== "") {
-      username = String(req.body.username).trim().replace(/^@+/, "").toLowerCase();
+    if (name.length > 100) {
+      return res.status(400).json({
+        message: "Name must not exceed 100 characters.",
+      });
+    }
+
+    if (email.length > 254) {
+      return res.status(400).json({
+        message: "Please enter a valid email address.",
+      });
+    }
+
+    // Basic email format validation.
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (!emailPattern.test(email)) {
+      return res.status(400).json({
+        message: "Please enter a valid email address.",
+      });
+    }
+
+    if (password.length < PASSWORD_MIN_LENGTH) {
+      return res.status(400).json({
+        message: "Password must contain at least 6 characters.",
+      });
+    }
+
+    if (Buffer.byteLength(password, "utf8") > 72) {
+      return res.status(400).json({
+        message: "Password is too long.",
+      });
+    }
+
+    // Optional username validation.
+    if (
+      rawUsername !== undefined &&
+      String(rawUsername).trim() !== ""
+    ) {
+      username = normalizeUsername(rawUsername);
+
       if (!USERNAME_PATTERN.test(username)) {
-        return res.status(400).json({ message: "Usernames use 3-20 letters, numbers, or underscores." });
+        return res.status(400).json({
+          message:
+            "Username must be 3-20 characters and contain only lowercase letters, numbers, or underscores.",
+        });
       }
-      if (await User.exists({ username })) {
-        return res.status(409).json({ message: "That username is already taken." });
+
+      const existingUsername = await User.exists({ username });
+
+      if (existingUsername) {
+        return res.status(409).json({
+          message: "That username is already taken.",
+        });
       }
     }
 
+    // Check duplicate email.
     const existingUser = await User.findOne({ email });
-    if (existingUser) return res.status(409).json({ message: "An account already uses this email." });
+
+    if (existingUser) {
+      return res.status(409).json({
+        message: "An account already uses this email.",
+      });
+    }
 
     const hashedPassword = await bcrypt.hash(password, 12);
-    const user = await User.create({
+
+    const chatlyId = await createChatlyId();
+
+    const userData = {
       name,
       email,
       password: hashedPassword,
-      chatlyId: await createChatlyId(),
-      ...(username ? { username } : {}),
-    });
+      chatlyId,
+      emailVerified: false,
+    };
+
+    if (username) {
+      userData.username = username;
+    }
+
+    const user = await User.create(userData);
+    createdUserId = user._id;
 
     try {
       await issueVerificationEmail(user);
     } catch (emailError) {
+      console.error("Verification email sending failed:", emailError);
+
+      // Do not leave an unusable unverified account if email sending fails.
       await User.deleteOne({ _id: user._id });
-      return res.status(503).json({ message: "Could not send a verification email. Please try again later." });
+
+      return res.status(503).json({
+        message:
+          "Could not send a verification email. Please check your email settings and try again later.",
+      });
     }
 
     return res.status(201).json({
@@ -85,20 +222,71 @@ exports.register = async (req, res) => {
       email: user.email,
     });
   } catch (error) {
-    return res.status(500).json({ message: "Could not create your account." });
+    console.error("Register error:", error);
+
+    // Handle MongoDB duplicate-key errors safely.
+    if (error?.code === 11000) {
+      const duplicateField = Object.keys(error.keyPattern || {})[0];
+
+      if (duplicateField === "username") {
+        return res.status(409).json({
+          message: "That username is already taken.",
+        });
+      }
+
+      if (duplicateField === "email") {
+        return res.status(409).json({
+          message: "An account already uses this email.",
+        });
+      }
+
+      return res.status(409).json({
+        message: "This information is already in use.",
+      });
+    }
+
+    return handleServerError(
+      res,
+      error,
+      "Could not create your account."
+    );
   }
 };
 
+// =========================
+// LOGIN
+// =========================
+
 exports.login = async (req, res) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
-    const password = String(req.body.password || "");
-    if (!email || !password) return res.status(400).json({ message: "Email and password are required." });
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || "");
+
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required.",
+      });
+    }
 
     const user = await User.findOne({ email }).select("+password");
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(401).json({ message: "Incorrect email or password." });
+
+    if (!user || !user.password) {
+      return res.status(401).json({
+        message: "Incorrect email or password.",
+      });
     }
+
+    const passwordMatches = await bcrypt.compare(
+      password,
+      user.password
+    );
+
+    if (!passwordMatches) {
+      return res.status(401).json({
+        message: "Incorrect email or password.",
+      });
+    }
+
     if (!user.emailVerified) {
       return res.status(403).json({
         code: "EMAIL_NOT_VERIFIED",
@@ -108,49 +296,128 @@ exports.login = async (req, res) => {
 
     await ensureChatlyId(user);
 
-    return res.json({ token: createToken(user._id), user: publicUser(user) });
+    const token = createToken(user._id);
+
+    return res.status(200).json({
+      message: "Signed in successfully.",
+      token,
+      user: publicUser(user),
+    });
   } catch (error) {
-    return res.status(500).json({ message: "Could not sign you in." });
+    return handleServerError(
+      res,
+      error,
+      "Could not sign you in."
+    );
   }
 };
 
+// =========================
+// VERIFY EMAIL
+// =========================
+
 exports.verifyEmail = async (req, res) => {
   try {
-    const token = String(req.body.token || "");
-    if (!token) return res.status(400).json({ message: "Verification link is missing." });
+    const token = String(req.body?.token || "").trim();
 
-    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    if (!token) {
+      return res.status(400).json({
+        message: "Verification link is missing.",
+      });
+    }
+
+    const tokenHash = crypto
+      .createHash("sha256")
+      .update(token)
+      .digest("hex");
+
     const user = await User.findOne({
       emailVerificationToken: tokenHash,
       emailVerificationExpires: { $gt: new Date() },
-    }).select("+emailVerificationToken +emailVerificationExpires");
-    if (!user) return res.status(400).json({ message: "This verification link is invalid or has expired." });
+    }).select(
+      "+emailVerificationToken +emailVerificationExpires"
+    );
+
+    if (!user) {
+      return res.status(400).json({
+        message:
+          "This verification link is invalid or has expired. Please request a new one.",
+      });
+    }
 
     user.emailVerified = true;
     user.emailVerificationToken = undefined;
     user.emailVerificationExpires = undefined;
+
     await user.save();
-    return res.json({ message: "Your email has been verified. You can now sign in." });
+
+    return res.status(200).json({
+      message: "Your email has been verified. You can now sign in.",
+    });
   } catch (error) {
-    return res.status(500).json({ message: "Could not verify your email." });
+    return handleServerError(
+      res,
+      error,
+      "Could not verify your email."
+    );
   }
 };
 
+// =========================
+// RESEND VERIFICATION EMAIL
+// =========================
+
 exports.resendVerification = async (req, res) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
-    if (!email) return res.status(400).json({ message: "Email is required." });
+    const email = normalizeEmail(req.body?.email);
 
-    const user = await User.findOne({ email }).select("+verificationEmailSentAt");
-    if (!user) return res.json({ message: "If this account exists, a verification email has been sent." });
-    if (user.emailVerified) return res.status(400).json({ message: "This email address is already verified. Please sign in." });
-    if (user.verificationEmailSentAt && Date.now() - user.verificationEmailSentAt.getTime() < 60 * 1000) {
-      return res.status(429).json({ message: "Please wait one minute before requesting another email." });
+    if (!email) {
+      return res.status(400).json({
+        message: "Email is required.",
+      });
+    }
+
+    const user = await User.findOne({ email }).select(
+      "+verificationEmailSentAt"
+    );
+
+    // Avoid revealing whether an account exists.
+    if (!user) {
+      return res.status(200).json({
+        message:
+          "If this account exists and needs verification, an email will be sent.",
+      });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({
+        message:
+          "This email address is already verified. Please sign in.",
+      });
+    }
+
+    if (
+      user.verificationEmailSentAt &&
+      Date.now() - new Date(user.verificationEmailSentAt).getTime() <
+        RESEND_COOLDOWN_MS
+    ) {
+      return res.status(429).json({
+        message:
+          "Please wait one minute before requesting another email.",
+      });
     }
 
     await issueVerificationEmail(user);
-    return res.json({ message: "A new verification link has been sent." });
+
+    return res.status(200).json({
+      message: "A new verification link has been sent.",
+    });
   } catch (error) {
-    return res.status(503).json({ message: "Could not send a verification email. Please try again later." });
+    console.error("Resend verification error:", error);
+
+    return res.status(503).json({
+      message:
+        "Could not send a verification email. Please try again later.",
+    });
   }
 };
