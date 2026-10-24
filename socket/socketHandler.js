@@ -25,9 +25,8 @@ function socketHandler(io) {
       const token = socket.handshake.auth?.token;
       if (!token) return next(new Error("Authentication required"));
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const user = await User.findById(decoded.id).select("name emailVerified");
+      const user = await User.findById(decoded.id).select("name");
       if (!user) return next(new Error("User not found"));
-      if (!user.emailVerified) return next(new Error("Verify your email address before connecting."));
       socket.data.user = { id: user._id.toString(), name: user.name };
       return next();
     } catch (error) {

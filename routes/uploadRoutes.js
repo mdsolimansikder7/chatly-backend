@@ -1,16 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs");
 const protect = require("../middleware/authMiddleware");
-
-fs.mkdirSync("uploads", { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: "uploads/",
-  filename: (req, file, cb) =>
-    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`),
-});
 
 const allowedMimes = [
   "image/jpeg",
@@ -30,7 +21,12 @@ const allowedMimes = [
 ];
 
 const upload = multer({
-  storage,
+  storage: multer.diskStorage({
+    destination: (req, file, cb) =>
+      cb(null, req.app.get("uploadsDirectory")),
+    filename: (req, file, cb) =>
+      cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`),
+  }),
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (allowedMimes.includes(file.mimetype)) return cb(null, true);

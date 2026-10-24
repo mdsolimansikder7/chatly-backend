@@ -1,11 +1,9 @@
 
 const bcrypt = require("bcryptjs");
-const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 
 const User = require("../models/User");
 const { createChatlyId, ensureChatlyId } = require("../utils/chatlyId");
-const { sendVerificationEmail } = require("../utils/email");
 
 // =========================
 // Constants
@@ -13,8 +11,6 @@ const { sendVerificationEmail } = require("../utils/email");
 
 const USERNAME_PATTERN = /^[a-z0-9_]{3,20}$/;
 const PASSWORD_MIN_LENGTH = 6;
-const VERIFICATION_TOKEN_EXPIRY_MS = 60 * 60 * 1000;
-const RESEND_COOLDOWN_MS = 60 * 1000;
 
 // =========================
 // Helpers
@@ -43,7 +39,6 @@ function publicUser(user) {
     isOnline: user.isOnline,
     lastSeen: user.lastSeen,
     showActiveStatus: user.showActiveStatus,
-    emailVerified: user.emailVerified,
   };
 }
 
@@ -58,15 +53,6 @@ function normalizeUsername(value) {
     .toLowerCase();
 }
 
-function createVerificationToken() {
-  const token = crypto.randomBytes(32).toString("hex");
-
-  return {
-    token,
-    tokenHash: crypto.createHash("sha256").update(token).digest("hex"),
-  };
-}
-
 function handleServerError(res, error, message) {
   // Full error details go to server logs, not to the client.
   console.error(message, error);
@@ -77,34 +63,10 @@ function handleServerError(res, error, message) {
 }
 
 // =========================
-// Email Verification Helper
-// =========================
-
-async function issueVerificationEmail(user) {
-  const { token, tokenHash } = createVerificationToken();
-
-  user.emailVerificationToken = tokenHash;
-  user.emailVerificationExpires = new Date(
-    Date.now() + VERIFICATION_TOKEN_EXPIRY_MS
-  );
-  user.verificationEmailSentAt = new Date();
-
-  await user.save();
-
-  await sendVerificationEmail({
-    email: user.email,
-    name: user.name,
-    token,
-  });
-}
-
-// =========================
 // REGISTER
 // =========================
 
 exports.register = async (req, res) => {
-  let createdUserId = null;
-
   try {
     const name = String(req.body?.name || "").trim();
     const email = normalizeEmail(req.body?.email);
@@ -193,7 +155,6 @@ exports.register = async (req, res) => {
       email,
       password: hashedPassword,
       chatlyId,
-      emailVerified: false,
     };
 
     if (username) {
@@ -201,25 +162,11 @@ exports.register = async (req, res) => {
     }
 
     const user = await User.create(userData);
-    createdUserId = user._id;
-
-    try {
-      await issueVerificationEmail(user);
-    } catch (emailError) {
-      console.error("Verification email sending failed:", emailError);
-
-      // Do not leave an unusable unverified account if email sending fails.
-      await User.deleteOne({ _id: user._id });
-
-      return res.status(503).json({
-        message:
-          "Could not send a verification email. Please check your email settings and try again later.",
-      });
-    }
 
     return res.status(201).json({
-      message: "We sent a verification link to your email address.",
-      email: user.email,
+      message: "Account created successfully.",
+      token: createToken(user._id),
+      user: publicUser(user),
     });
   } catch (error) {
     console.error("Register error:", error);
@@ -287,13 +234,6 @@ exports.login = async (req, res) => {
       });
     }
 
-    if (!user.emailVerified) {
-      return res.status(403).json({
-        code: "EMAIL_NOT_VERIFIED",
-        message: "Verify your email address before signing in.",
-      });
-    }
-
     await ensureChatlyId(user);
 
     const token = createToken(user._id);
@@ -309,115 +249,5 @@ exports.login = async (req, res) => {
       error,
       "Could not sign you in."
     );
-  }
-};
-
-// =========================
-// VERIFY EMAIL
-// =========================
-
-exports.verifyEmail = async (req, res) => {
-  try {
-    const token = String(req.body?.token || "").trim();
-
-    if (!token) {
-      return res.status(400).json({
-        message: "Verification link is missing.",
-      });
-    }
-
-    const tokenHash = crypto
-      .createHash("sha256")
-      .update(token)
-      .digest("hex");
-
-    const user = await User.findOne({
-      emailVerificationToken: tokenHash,
-      emailVerificationExpires: { $gt: new Date() },
-    }).select(
-      "+emailVerificationToken +emailVerificationExpires"
-    );
-
-    if (!user) {
-      return res.status(400).json({
-        message:
-          "This verification link is invalid or has expired. Please request a new one.",
-      });
-    }
-
-    user.emailVerified = true;
-    user.emailVerificationToken = undefined;
-    user.emailVerificationExpires = undefined;
-
-    await user.save();
-
-    return res.status(200).json({
-      message: "Your email has been verified. You can now sign in.",
-    });
-  } catch (error) {
-    return handleServerError(
-      res,
-      error,
-      "Could not verify your email."
-    );
-  }
-};
-
-// =========================
-// RESEND VERIFICATION EMAIL
-// =========================
-
-exports.resendVerification = async (req, res) => {
-  try {
-    const email = normalizeEmail(req.body?.email);
-
-    if (!email) {
-      return res.status(400).json({
-        message: "Email is required.",
-      });
-    }
-
-    const user = await User.findOne({ email }).select(
-      "+verificationEmailSentAt"
-    );
-
-    // Avoid revealing whether an account exists.
-    if (!user) {
-      return res.status(200).json({
-        message:
-          "If this account exists and needs verification, an email will be sent.",
-      });
-    }
-
-    if (user.emailVerified) {
-      return res.status(400).json({
-        message:
-          "This email address is already verified. Please sign in.",
-      });
-    }
-
-    if (
-      user.verificationEmailSentAt &&
-      Date.now() - new Date(user.verificationEmailSentAt).getTime() <
-        RESEND_COOLDOWN_MS
-    ) {
-      return res.status(429).json({
-        message:
-          "Please wait one minute before requesting another email.",
-      });
-    }
-
-    await issueVerificationEmail(user);
-
-    return res.status(200).json({
-      message: "A new verification link has been sent.",
-    });
-  } catch (error) {
-    console.error("Resend verification error:", error);
-
-    return res.status(503).json({
-      message:
-        "Could not send a verification email. Please try again later.",
-    });
   }
 };
