@@ -9,7 +9,7 @@ const CODE_TTL = 2 * 60 * 1000;
 const FACEBOOK_GRAPH_VERSION = "v22.0";
 
 function getClientUrl() {
-  return (process.env.CLIENT_URL || "http://localhost:5173").replace(/\/+$/, "");
+  return (process.env.CLIENT_URL || process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/+$/, "");
 }
 
 function getProviderConfig(provider) {
