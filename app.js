@@ -14,6 +14,7 @@ const userRoutes = require("./routes/userRoutes");
 const friendRoutes = require("./routes/friendRoutes");
 const uploadRoutes = require("./routes/uploadRoutes");
 const callRoutes = require("./routes/callRoutes");
+const { getBetterAuth } = require("./config/betterAuth");
 
 const app = express();
 const uploadsDirectory = process.env.VERCEL
@@ -43,10 +44,25 @@ const corsOptions = {
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true,
 };
 
 app.options(/.*/, cors(corsOptions));
 app.use(cors(corsOptions));
+
+app.all("/api/better-auth/*splat", async (req, res, next) => {
+  try {
+    const [{ toNodeHandler }, auth] = await Promise.all([
+      import("better-auth/node"),
+      getBetterAuth(),
+    ]);
+    return toNodeHandler(auth)(req, res, next);
+  } catch (error) {
+    console.error("Better Auth request failed:", error.message);
+    return res.status(503).json({ message: "Google sign-in is not available." });
+  }
+});
+
 app.use(express.json({ limit: "1mb" }));
 app.set("uploadsDirectory", uploadsDirectory);
 
@@ -59,10 +75,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api", async (req, res, next) => {
-  if (
-    req.method === "GET" &&
-    (req.path === "/auth/google" || req.path === "/auth/facebook")
-  ) {
+  if (req.method === "GET" && req.path === "/auth/facebook") {
     return next();
   }
 

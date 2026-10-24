@@ -10,7 +10,9 @@
     "check": "node --check index.js && node --check app.js && node --check server.js"
   },
   "dependencies": {
+    "@better-auth/mongo-adapter": "^1.7.12",
     "bcryptjs": "^3.0.2",
+    "better-auth": "^1.7.12",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
