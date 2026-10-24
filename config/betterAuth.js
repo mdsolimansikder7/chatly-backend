@@ -3,13 +3,12 @@ const connectDB = require("./db");
 
 let authPromise;
 
-function getBackendUrl() {
-  const vercelHost = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
+function getAuthOrigin() {
   return (
+    process.env.CLIENT_URL ||
+    process.env.FRONTEND_URL ||
     process.env.BETTER_AUTH_URL ||
-    process.env.API_BASE_URL ||
-    process.env.RENDER_EXTERNAL_URL ||
-    (vercelHost ? `https://${vercelHost}` : `http://localhost:${Number(process.env.PORT) || 5000}`)
+    "http://localhost:5173"
   ).replace(/\/+$/, "");
 }
 
@@ -38,11 +37,9 @@ async function getBetterAuth() {
         "http://localhost:5173",
         "https://chatly-message.vercel.app",
       ].filter(Boolean).map((origin) => origin.replace(/\/+$/, ""));
-      const production = process.env.NODE_ENV === "production";
-
       return betterAuth({
         appName: "Chatly",
-        baseURL: getBackendUrl(),
+        baseURL: getAuthOrigin(),
         basePath: "/api/better-auth",
         secret,
         database: mongodbAdapter(database, {
@@ -66,8 +63,8 @@ async function getBetterAuth() {
         },
         advanced: {
           defaultCookieAttributes: {
-            sameSite: production ? "none" : "lax",
-            secure: production,
+            sameSite: "lax",
+            secure: process.env.NODE_ENV === "production",
           },
         },
       });
@@ -80,4 +77,4 @@ async function getBetterAuth() {
   return authPromise;
 }
 
-module.exports = { getBackendUrl, getBetterAuth };
+module.exports = { getAuthOrigin, getBetterAuth };
