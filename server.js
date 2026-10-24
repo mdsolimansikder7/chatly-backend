@@ -32,6 +32,8 @@ const allowedOrigins = [
   .filter(Boolean)
   .map((url) => url.replace(/\/+$/, ""));
 
+const uniqueAllowedOrigins = [...new Set(allowedOrigins)];
+
 // CORS configuration
 const corsOptions = {
   origin(origin, callback) {
@@ -42,7 +44,7 @@ const corsOptions = {
 
     const normalizedOrigin = origin.replace(/\/+$/, "");
 
-    if (allowedOrigins.includes(normalizedOrigin)) {
+    if (uniqueAllowedOrigins.includes(normalizedOrigin)) {
       return callback(null, true);
     }
 
@@ -53,6 +55,7 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
+app.options(/.*/, cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 
@@ -128,7 +131,7 @@ app.use((err, req, res, next) => {
 // Socket.IO configuration
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: uniqueAllowedOrigins,
     methods: ["GET", "POST"],
   },
 });
@@ -150,7 +153,7 @@ async function start() {
 
   server.listen(port, "0.0.0.0", () => {
     console.log(`Chatly API listening on port ${port}`);
-    console.log("Allowed frontend origins:", allowedOrigins);
+    console.log("Allowed frontend origins:", uniqueAllowedOrigins);
   });
 }
 
